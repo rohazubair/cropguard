@@ -1,0 +1,5 @@
+prefect
+requests
+psycopg2-binary
+pandas
+great_expectations
