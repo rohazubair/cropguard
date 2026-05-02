@@ -8,7 +8,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ingestion.ingest_weather import fetch_weather, get_districts, save_to_db
 
-@task(retries=3, retry_delay_seconds=10)
+@task(retries=6, retry_delay_seconds=25)
 def process_district_data(district):
     print(f"Prefect Task: Starting ingestion for {district['name']}...")
     data = fetch_weather(district["lat"], district["lon"])

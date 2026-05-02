@@ -37,3 +37,33 @@ INSERT INTO cropguard_dev.DimDistrict (name, province, lat, lon) VALUES
 ('Sukkur', 'Sindh', 27.713900, 68.836900),
 ('Abbottabad', 'Khyber Pakhtunkhwa', 34.143900, 73.211400)
 ON CONFLICT (name) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS cropguard_dev.DimCrop (
+    crop_id SERIAL PRIMARY KEY,
+    name VARCHAR(64) NOT NULL UNIQUE
+);
+
+COMMENT ON TABLE cropguard_dev.DimCrop IS 'Crop taxonomy (e.g. rice, wheat)';
+
+CREATE TABLE IF NOT EXISTS cropguard_dev.FactCropTemperatureRange (
+    crop_id INT PRIMARY KEY REFERENCES cropguard_dev.DimCrop(crop_id) ON DELETE CASCADE,
+    temp_min_c DECIMAL(5, 2) NOT NULL,
+    temp_max_c DECIMAL(5, 2) NOT NULL,
+    sample_count INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+COMMENT ON TABLE cropguard_dev.FactCropTemperatureRange IS 'Dataset-derived operating temperature envelope per crop (all districts)';
+
+CREATE TABLE IF NOT EXISTS cropguard_dev.FactCropDistrictHealthyTemp (
+    id SERIAL PRIMARY KEY,
+    crop_id INT NOT NULL REFERENCES cropguard_dev.DimCrop(crop_id) ON DELETE CASCADE,
+    district_id INT NOT NULL REFERENCES cropguard_dev.DimDistrict(district_id) ON DELETE CASCADE,
+    temp_min_c DECIMAL(5, 2) NOT NULL,
+    temp_max_c DECIMAL(5, 2) NOT NULL,
+    sample_count INT NOT NULL DEFAULT 0,
+    updated_at TIMESTAMP NOT NULL DEFAULT now(),
+    UNIQUE (crop_id, district_id)
+);
+
+COMMENT ON TABLE cropguard_dev.FactCropDistrictHealthyTemp IS 'Healthy ambient temperature band for a crop within a district (from CSV aggregates)';

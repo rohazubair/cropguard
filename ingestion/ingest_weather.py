@@ -3,12 +3,18 @@ import sys
 sys.dont_write_bytecode = True
 
 import os
+import time
 from pathlib import Path
 
 import psycopg2
 from psycopg2 import sql
 import requests
-from dotenv import load_dotenv
+
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    def load_dotenv(*_a, **_kw):  # pragma: no cover
+        return False
 
 load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
@@ -35,8 +41,29 @@ def _configure_search_path(cur):
     )
 
 
+def connect_db(*, attempts: int = 8, initial_delay_s: float = 2.0) -> psycopg2.extensions.connection:
+    """
+    Open a DB connection with retries. Helps with intermittent DNS/network during long ingest runs
+    (e.g. \"could not translate host name … nodename nor servname provided\").
+
+    Almost all OperationalErrors are retried except obvious auth / pg_hba rejections so DNS blips recover.
+    """
+    for attempt in range(attempts):
+        try:
+            return psycopg2.connect(_database_url())
+        except psycopg2.OperationalError as exc:
+            msg = str(exc).lower()
+            if "password authentication failed" in msg or "no pg_hba.conf entry" in msg:
+                raise
+            if attempt == attempts - 1:
+                raise
+            time.sleep(min(initial_delay_s * (2**attempt), 45.0))
+
+    raise RuntimeError("connect_db: unreachable")
+
+
 def get_districts():
-    conn = psycopg2.connect(_database_url())
+    conn = connect_db()
     try:
         cur = conn.cursor()
         _configure_search_path(cur)
@@ -64,44 +91,62 @@ def get_districts():
     ]
 
 
-def fetch_weather(lat, lon):
+def fetch_weather(lat, lon, *, past_days: int = 14, forecast_days: int = 7):
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
         "hourly": "temperature_2m,precipitation,relative_humidity_2m,soil_moisture_0_to_7cm",
         "timezone": "auto",
-        "forecast_days": 1,
+        "past_days": past_days,
+        "forecast_days": forecast_days,
     }
-    response = requests.get(url, params=params, timeout=10)
+    response = requests.get(url, params=params, timeout=60)
     response.raise_for_status()
     return response.json()
 
 
 def save_to_db(district_id, data):
-    conn = psycopg2.connect(_database_url())
+    conn = connect_db()
     try:
         cur = conn.cursor()
         _configure_search_path(cur)
         hourly = data["hourly"]
         for i in range(len(hourly["time"])):
+            temperature = hourly["temperature_2m"][i]
+            precipitation = hourly["precipitation"][i]
+            humidity = hourly["relative_humidity_2m"][i]
+            soil_moisture = hourly["soil_moisture_0_to_7cm"][i]
+
             cur.execute(
                 """
-                INSERT INTO FactWeatherReadings (district_id, timestamp, temp_min, precipitation_mm, humidity_pct, soil_moisture)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                INSERT INTO FactWeatherReadings (
+                    district_id,
+                    timestamp,
+                    temp_min,
+                    temp_max,
+                    precipitation_mm,
+                    humidity_pct,
+                    soil_moisture
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (district_id, timestamp) DO NOTHING;
                 """,
                 (
                     district_id,
                     hourly["time"][i],
-                    hourly["temperature_2m"][i],
-                    hourly["precipitation"][i],
-                    hourly["relative_humidity_2m"][i],
-                    hourly["soil_moisture_0_to_7cm"][i],
+                    temperature,
+                    temperature,
+                    precipitation,
+                    humidity,
+                    soil_moisture,
                 ),
             )
         conn.commit()
         cur.close()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 

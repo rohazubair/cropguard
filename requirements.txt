@@ -4,3 +4,8 @@ psycopg2-binary
 python-dotenv
 pandas
 great_expectations
+numpy
+scikit-learn
+joblib
+fastapi
+uvicorn[standard]
