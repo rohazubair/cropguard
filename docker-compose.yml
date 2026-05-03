@@ -1,21 +1,86 @@
 services:
-  db:
-    image: postgres:15
-    container_name: cropguard_db
-    environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password123
-      POSTGRES_DB: cropguard
+  prefect:
+    build: .
+    container_name: cropguard_prefect
+    command: ["prefect", "server", "start", "--host", "0.0.0.0", "--port", "4200"]
     ports:
-      - "5433:5432" 
+      - "4200:4200"
+    volumes:
+      - prefect_home:/root/.prefect
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health', timeout=5).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
+  api:
+    build: .
+    container_name: cropguard_api
+    env_file:
+      - .env
+    environment:
+      # Cockroach Cloud + sslmode=verify-full: place CA from console as ./certs/root.crt
+      PGSSLROOTCERT: /app/certs/root.crt
+    volumes:
+      - ./certs:/app/certs:ro
+    ports:
+      - "8000:8000"
+
+  streamlit:
+    build: .
+    container_name: cropguard_streamlit
+    env_file:
+      - .env
+    environment:
+      CROPGUARD_API_BASE: http://api:8000
+    ports:
+      - "8501:8501"
+    command:
+      [
+        "streamlit",
+        "run",
+        "dashboard/app.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+        "--browser.gatherUsageStats=false",
+      ]
+    depends_on:
+      - api
+
+  pipeline:
+    profiles: ["pipeline"]
+    build: .
+    container_name: cropguard_pipeline
+    env_file:
+      - .env
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+      PGSSLROOTCERT: /app/certs/root.crt
+    command: ["python", "main.py"]
+    volumes:
+      - cropguard_artifacts:/app/artifacts
+      - ./certs:/app/certs:ro
+    depends_on:
+      prefect:
+        condition: service_healthy
 
   pgadmin:
     image: dpage/pgadmin4
     container_name: cropguard_pgadmin
+    profiles: ["tools"]
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - "8080:80"
-    depends_on:
-      - db
+
+volumes:
+  cropguard_artifacts:
+  prefect_home:

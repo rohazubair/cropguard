@@ -1,5 +1,13 @@
-prefect
+prefect>=2.14,<4
 requests
 psycopg2-binary
+python-dotenv
 pandas
-great_expectations
+rapidfuzz
+great_expectations>=1.0,<2
+numpy
+scikit-learn
+joblib
+fastapi
+uvicorn[standard]
+streamlit>=1.28,<2
