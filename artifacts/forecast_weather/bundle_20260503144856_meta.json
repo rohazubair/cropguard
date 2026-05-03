@@ -1,0 +1,57 @@
+{
+  "version": "20260503144856",
+  "metrics": {
+    "val_mae_temp": {
+      "0.1": 1.2175,
+      "0.5": 0.6162,
+      "0.9": 0.725
+    },
+    "val_mae_humidity": {
+      "0.1": 5.1141,
+      "0.5": 3.7914,
+      "0.9": 4.2113
+    },
+    "n_train_rows": 72
+  },
+  "meta": {
+    "model_name": "weather_daily_multistep",
+    "n_supervised_rows": 72,
+    "n_daily_rows": 792,
+    "train_data_end_date": "2026-05-10",
+    "val_mae_temp_p50": 0.6162,
+    "val_mae_humidity_p50": 3.7914,
+    "feature_cols": [
+      "district_id",
+      "t_0",
+      "t_1",
+      "t_2",
+      "t_3",
+      "t_4",
+      "t_5",
+      "t_6",
+      "t_7",
+      "t_8",
+      "t_9",
+      "t_10",
+      "t_11",
+      "t_12",
+      "t_13",
+      "h_0",
+      "h_1",
+      "h_2",
+      "h_3",
+      "h_4",
+      "h_5",
+      "h_6",
+      "h_7",
+      "h_8",
+      "h_9",
+      "h_10",
+      "h_11",
+      "h_12",
+      "h_13"
+    ],
+    "horizon_days": 7,
+    "lookback_days": 14
+  }
+}
