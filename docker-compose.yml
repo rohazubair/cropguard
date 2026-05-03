@@ -25,6 +25,11 @@ services:
     container_name: cropguard_api
     env_file:
       - .env
+    environment:
+      # Cockroach Cloud + sslmode=verify-full: place CA from console as ./certs/root.crt
+      PGSSLROOTCERT: /app/certs/root.crt
+    volumes:
+      - ./certs:/app/certs:ro
     ports:
       - "8000:8000"
 
@@ -57,9 +62,11 @@ services:
       - .env
     environment:
       PREFECT_API_URL: http://prefect:4200/api
+      PGSSLROOTCERT: /app/certs/root.crt
     command: ["python", "main.py"]
     volumes:
       - cropguard_artifacts:/app/artifacts
+      - ./certs:/app/certs:ro
     depends_on:
       prefect:
         condition: service_healthy

@@ -39,7 +39,7 @@ def _fetch_rows(sql: str) -> list[dict[str, Any]]:
             except psycopg2.Error as exc:
                 conn.rollback()
                 if getattr(exc, 'pgcode', None) == errorcodes.UNDEFINED_TABLE:
-                    raise HTTPException(status_code=503, detail='Gold dashboard views are missing. Apply `storage/setup_db.sql` and run the forecast pipeline.') from exc
+                    raise HTTPException(status_code=503, detail='Gold dashboard tables are missing. Apply `storage/setup_db.sql` and run the forecast pipeline.') from exc
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
     finally:
         conn.close()

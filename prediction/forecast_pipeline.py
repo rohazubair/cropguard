@@ -8,7 +8,7 @@ from ingestion.apply_bronze_schema import apply_bronze_schema
 from ingestion.ingest_weather import _configure_search_path
 from prediction.forecast_constants import HORIZON_DAYS, LOOKBACK_DAYS, MODEL_NAME_WEATHER_DAILY
 from prediction.forecast_daily_dataset import hourly_to_daily
-from prediction.forecast_db import db_conn, finish_run, get_active_model, insert_crop_risk_points, insert_model_registry, insert_run, insert_weather_points, publish_run, utc_now_naive
+from prediction.forecast_db import db_conn, finish_run, get_active_model, insert_crop_risk_points, insert_model_registry, insert_run, insert_weather_points, publish_run, refresh_gold_dashboard, utc_now_naive
 from prediction.forecast_drift import should_retrain_from_drift
 from prediction.forecast_risk import crop_envelopes, score_crop_day, valid_dates_from_anchor
 from prediction.forecast_train import train_from_silver_hourly
@@ -135,6 +135,7 @@ def run_forecast_pipeline(*, project_root: Path | None=None) -> dict[str, Any]:
         insert_crop_risk_points(cur, run_id, risk_rows)
         publish_run(cur, run_id)
         finish_run(cur, run_id, status='success', drift_checked=True, drift_retrain_triggered=summary.get('retrained', False), notes=None)
+        refresh_gold_dashboard(cur)
         conn.commit()
         cur.close()
         summary.update({'status': 'success', 'published_run_id': run_id, 'weather_points': len(weather_rows), 'crop_risk_points': len(risk_rows), 'model_id': int(active2['model_id'])})

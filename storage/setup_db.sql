@@ -124,64 +124,55 @@ CREATE TABLE IF NOT EXISTS silver.ml_forecast_crop_risk_point (
 
 CREATE SCHEMA IF NOT EXISTS gold;
 
-CREATE OR REPLACE VIEW gold.v_dashboard_forecast_weather AS
-SELECT
-    w.run_id,
-    w.district_id,
-    d.name AS district_name,
-    d.lat,
-    d.lon,
-    w.valid_date,
-    w.horizon_day,
-    w.temp_p10,
-    w.temp_p50,
-    w.temp_p90,
-    w.humidity_p10,
-    w.humidity_p50,
-    w.humidity_p90,
-    r.started_at AS run_started_at,
-    r.finished_at AS run_finished_at,
-    r.input_weather_until,
-    r.status AS run_status
-FROM silver.ml_forecast_weather_point w
-JOIN silver.ml_forecast_run_published p ON p.key = 'default' AND w.run_id = p.run_id
-JOIN silver.districts_dim d ON d.district_id = w.district_id
-LEFT JOIN silver.ml_forecast_run r ON r.run_id = w.run_id;
+CREATE TABLE IF NOT EXISTS gold.v_dashboard_forecast_weather (
+    run_id BIGINT NOT NULL,
+    district_id BIGINT NOT NULL,
+    district_name VARCHAR(50) NOT NULL,
+    lat DECIMAL(9,6) NOT NULL,
+    lon DECIMAL(9,6) NOT NULL,
+    valid_date DATE NOT NULL,
+    horizon_day SMALLINT NOT NULL,
+    temp_p10 DOUBLE PRECISION,
+    temp_p50 DOUBLE PRECISION,
+    temp_p90 DOUBLE PRECISION,
+    humidity_p10 DOUBLE PRECISION,
+    humidity_p50 DOUBLE PRECISION,
+    humidity_p90 DOUBLE PRECISION,
+    run_started_at TIMESTAMP,
+    run_finished_at TIMESTAMP,
+    input_weather_until TIMESTAMP,
+    run_status VARCHAR(24),
+    PRIMARY KEY (run_id, district_id, valid_date)
+);
 
-CREATE OR REPLACE VIEW gold.v_dashboard_forecast_crop_risk AS
-SELECT
-    c.run_id,
-    c.district_id,
-    d.name AS district_name,
-    c.crop_name,
-    c.valid_date,
-    c.risk_score,
-    c.risk_tier,
-    c.drivers_json,
-    r.input_weather_until,
-    r.status AS run_status
-FROM silver.ml_forecast_crop_risk_point c
-JOIN silver.ml_forecast_run_published p ON p.key = 'default' AND c.run_id = p.run_id
-JOIN silver.districts_dim d ON d.district_id = c.district_id
-LEFT JOIN silver.ml_forecast_run r ON r.run_id = c.run_id;
+CREATE TABLE IF NOT EXISTS gold.v_dashboard_forecast_crop_risk (
+    run_id BIGINT NOT NULL,
+    district_id BIGINT NOT NULL,
+    district_name VARCHAR(50) NOT NULL,
+    crop_name VARCHAR(128) NOT NULL,
+    valid_date DATE NOT NULL,
+    risk_score DOUBLE PRECISION NOT NULL,
+    risk_tier VARCHAR(24) NOT NULL,
+    drivers_json JSONB,
+    input_weather_until TIMESTAMP,
+    run_status VARCHAR(24),
+    PRIMARY KEY (run_id, district_id, crop_name, valid_date)
+);
 
-CREATE OR REPLACE VIEW gold.v_dashboard_published_forecast_run AS
-SELECT
-    r.run_id,
-    r.status,
-    r.started_at,
-    r.finished_at,
-    r.input_weather_until,
-    r.horizon_days,
-    r.granularity,
-    r.drift_checked,
-    r.drift_retrain_triggered,
-    m.model_id,
-    m.model_name,
-    m.version AS model_version,
-    m.artifact_uri,
-    m.trained_at AS model_trained_at,
-    p.published_at
-FROM silver.ml_forecast_run_published p
-JOIN silver.ml_forecast_run r ON r.run_id = p.run_id AND p.key = 'default'
-LEFT JOIN silver.ml_model_registry m ON m.model_id = r.model_id;
+CREATE TABLE IF NOT EXISTS gold.v_dashboard_published_forecast_run (
+    run_id BIGINT PRIMARY KEY,
+    status VARCHAR(24) NOT NULL,
+    started_at TIMESTAMP NOT NULL,
+    finished_at TIMESTAMP,
+    input_weather_until TIMESTAMP,
+    horizon_days INT NOT NULL,
+    granularity VARCHAR(24) NOT NULL,
+    drift_checked BOOLEAN,
+    drift_retrain_triggered BOOLEAN,
+    model_id BIGINT,
+    model_name VARCHAR(64),
+    model_version VARCHAR(48),
+    artifact_uri TEXT,
+    model_trained_at TIMESTAMP,
+    published_at TIMESTAMP NOT NULL
+);
