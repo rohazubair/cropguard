@@ -1,0 +1,3 @@
+# Prefect project name (optional metadata for `prefect deploy` / Cloud).
+# Flow entrypoint: `python main.py` or `python -m orchestration.flow`
+name: cropguard

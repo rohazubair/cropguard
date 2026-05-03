@@ -1,21 +1,56 @@
+# Loads the same DATABASE_URL (and any other vars) as on the host via `env_file: .env`.
+# Create `cropguard/.env` before running — see `.env.example`.
+
 services:
-  db:
-    image: postgres:15
-    container_name: cropguard_db
-    environment:
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: password123
-      POSTGRES_DB: cropguard
+  api:
+    build: .
+    container_name: cropguard_api
+    env_file:
+      - .env
     ports:
-      - "5433:5432" 
+      - "8000:8000"
+
+  streamlit:
+    build: .
+    container_name: cropguard_streamlit
+    env_file:
+      - .env
+    environment:
+      # Always hit the API by Docker DNS (overrides a host-only URL if present in .env).
+      CROPGUARD_API_BASE: http://api:8000
+    ports:
+      - "8501:8501"
+    command:
+      [
+        "streamlit",
+        "run",
+        "dashboard/app.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501",
+        "--browser.gatherUsageStats=false",
+      ]
+    depends_on:
+      - api
+
+  pipeline:
+    profiles: ["pipeline"]
+    build: .
+    container_name: cropguard_pipeline
+    env_file:
+      - .env
+    command: ["python", "main.py"]
+    volumes:
+      - cropguard_artifacts:/app/artifacts
 
   pgadmin:
     image: dpage/pgadmin4
     container_name: cropguard_pgadmin
+    profiles: ["tools"]
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@admin.com
       PGADMIN_DEFAULT_PASSWORD: admin
     ports:
       - "8080:80"
-    depends_on:
-      - db
+
+volumes:
+  cropguard_artifacts:

@@ -1,40 +1,27 @@
 # CropGuard
 
-CropGuard pulls **hourly weather** from Open-Meteo, stores it per district, derives **crop-friendly temperature bands** from your CSV dataset, trains a **pooled hourly temperature forecaster**, and exposes a **REST API** that combines forecasts with those bands to label each crop’s future stress as **healthy**, **medium**, or **danger**.
+CropGuard ingests **crop CSV** and **hourly weather** (Open-Meteo) into **PostgreSQL** (`bronze` → `silver`), runs a **drift-gated daily weather forecast** plus **crop risk** scoring into **`silver.ml_*`**, and exposes **gold** dashboard views. **Prefect** orchestrates the pipeline (`main.py`); **FastAPI** serves districts and dashboard JSON; **Streamlit** reads the API.
 
 ---
 
-## Big picture
+## Data flow (short)
 
-1. **Ingest weather** — For each row in `DimDistrict`, call Open-Meteo (past + forecast window), optionally clean rows, upsert into `FactWeatherReadings`.
-2. **Crop envelopes** — From `storage/Crop(Distric level).csv`, aggregate temperatures per crop (global) and per `(crop, district)`, then fill `FactCropTemperatureRange` and `FactCropDistrictHealthyTemp`.
-3. **Train the model** — Concatenate hourly series from all districts, engineer lag/rolling/calendar features, predict **next-hour** temperature with **scikit-learn `HistGradientBoostingRegressor`**, save under `artifacts/`.
-4. **Serve predictions** — The FastAPI app loads that artifact, runs **recursive multi-step** hourly forecasts for a chosen district, rolls them up **by calendar day**, and compares daily min/max to each crop’s bands to assign **health status**.
+1. **DDL** — `storage/setup_db.sql` defines `bronze`, `silver`, `gold` (tables + `gold.v_dashboard_*` views).
+2. **Ingest** — District geocode seed, crop CSV → `bronze.crop_facts` → `silver.crop_facts` (with Great Expectations checks), Open-Meteo → `bronze.weather_readings_fact` → `silver.weather_readings_fact`.
+3. **Forecast** — `prediction.forecast_pipeline` trains/serves a multi-output daily model, writes forecasts and risk to `silver.ml_*`, publishes a default run, **gold** views read the published run.
+4. **UI** — `uvicorn api.app:app` then `streamlit run dashboard/app.py` (set `CROPGUARD_API_BASE` if the API is not on `http://127.0.0.1:8000`).
 
 ```mermaid
 flowchart LR
-    subgraph ingest [Ingestion]
-        OM[Open-Meteo API]
-        WV[weather_validation.py]
-        DB[(PostgreSQL)]
-        OM --> WV --> DB
-    end
-    subgraph crops [Crop metadata]
-        CSV[Crop CSV]
-        LT[load_crop_tables.py]
-        CSV --> LT --> DB
-    end
-    subgraph ml [Forecasting]
-        TR[train_temperature.py]
-        ART[artifacts/*.joblib]
-        TR --> ART
-    end
-    subgraph api [API]
-        FA[FastAPI app]
-        ART --> FA
-        DB --> FA
-        FA --> H[forecast-health JSON]
-    end
+    CSV[Crop CSV] --> Bronze[bronze.crop_facts]
+    OM[Open-Meteo] --> BronzeW[bronze.weather_readings_fact]
+    Bronze --> Silver[silver.crop_facts / silver.weather_readings_fact]
+    BronzeW --> Silver
+    Silver --> ML[prediction.forecast_pipeline]
+    ML --> SilverML[silver.ml_*]
+    SilverML --> Gold[gold.v_dashboard_*]
+    API[FastAPI /dashboard] --> Gold
+    ST[Streamlit] --> API
 ```
 
 ---
@@ -43,143 +30,166 @@ flowchart LR
 
 | Path | Role |
 |------|------|
-| `main.py` | Applies `storage/setup_db.sql`, reloads crop tables from CSV, then runs the Prefect weather pipeline. |
-| `storage/setup_db.sql` | Creates schema `cropguard_dev` and tables: districts, weather readings, crops, global crop temperature range, district-specific healthy bands. |
-| `storage/Crop(Distric level).csv` | Crop samples with `temperature`, `label`, `district`; used to derive optimal temperature corridors. |
-| `ingestion/ingest_weather.py` | DB helpers, Open-Meteo fetch (`past_days` / `forecast_days`), writes `FactWeatherReadings` (hourly `temp_min`/`temp_max` mirror the same observation). |
-| `ingestion/weather_validation.py` | Parses hourly JSON → DataFrame, bounds checks, spike damping, short gap fill for training/inference hygiene. |
-| `ingestion/load_crop_tables.py` | Deletes/rebuilds `DimCrop` (+ cascaded facts), matches CSV district slugs to `lower(DimDistrict.name)`, inserts percentile-based min/max bands. |
-| `orchestration/flow.py` | Prefect flow that loops districts and calls `fetch_weather` → `save_to_db`. |
-| `prediction/features.py` | Per-district ordering, lags (`1`, `24`, `168`), rolling stats, cyclical time features; label = next hour (`forecast_target`). |
-| `prediction/train_temperature.py` | Downloads pooled series from Open-Meteo for every district, trains the pipeline, writes `artifacts/temperature_model.joblib` + metrics JSON. |
-| `prediction/forecast_temperature.py` | Loads the artifact, pulls fresh history for one district, **recursively** predicts N hours ahead (exo vars forward-filled after last observation). |
-| `api/app.py` | FastAPI: districts list, model metrics path, **`/districts/{id}/forecast-health`**. |
-| `api/health_engine.py` | Bucket hourly preds by **UTC date**; compare daily min/max to district/global bands → **healthy \| medium \| danger**. |
+| `main.py` | Runs Prefect bronze pipeline or `--forecast-only` forecast flow. |
+| `storage/setup_db.sql` | Bronze/silver/gold DDL and dashboard views. |
+| `orchestration/flow.py` | Prefect flow: schema → seed → crop → silver → weather → forecast. |
+| `orchestration/forecast_flow.py` | Prefect flow: forecast pipeline only. |
+| `ingestion/*` | CSV loaders, weather ingest, silver GE validation, district helpers. |
+| `prediction/forecast_pipeline.py` | Drift check, optional retrain, infer, publish to `silver.ml_*`. |
+| `prediction/forecast_train.py` | Daily multi-output model training from silver hourly weather. |
+| `prediction/forecast_db.py` | Inserts into `silver.ml_*` tables. |
+| `prediction/forecast_risk.py` | Risk tiers from crop facts + forecast bands. |
+| `api/app.py` | FastAPI: `/healthz`, `/districts`, `/dashboard/*`. |
+| `api/dashboard_routes.py` | JSON from `gold.v_dashboard_*`. |
+| `dashboard/app.py` | Streamlit charts (HTTP client to API). |
+| `Dockerfile` | Python 3.11 image + **ca-certificates** (TLS to cloud DBs); API default CMD; compose overrides for Streamlit / pipeline. |
+| `.env.example` | Template for **`DATABASE_URL`** (copy to **`.env`**). |
+| `docker-compose.yml` | FastAPI + Streamlit; **`env_file: .env`** (same **`DATABASE_URL`** as host); optional **pgadmin** and **pipeline** profiles; **`cropguard_artifacts`** volume for pipeline. |
 
 ---
 
-## Database model (conceptual)
+## Run with Docker
 
-- **`DimDistrict`** — Canonical districts with `lat` / `lon` (used for Open-Meteo and joins).
-- **`FactWeatherReadings`** — One row per `(district_id, timestamp)` with temperature, precipitation, humidity, soil moisture.
-- **`DimCrop`** — Distinct crop slug (e.g. `rice`) from the CSV `label` column.
-- **`FactCropTemperatureRange`** — One row per crop: **global** empirical min/max °C (from all CSV rows for that crop).
-- **`FactCropDistrictHealthyTemp`** — **Narrower** optimal band per `(crop_id, district_id)` where the CSV had rows for that district name (matched case-insensitively to `DimDistrict.name`).
+From **`cropguard/`** with [Docker Compose](https://docs.docker.com/compose/) installed.
 
-Rows in the CSV whose `district` does not match any `DimDistrict` are counted as skipped in the loader summary.
+**Same database as on the host:** put **`DATABASE_URL`** in **`.env`** (same file you use for `python main.py`). Compose injects that file into **api** and **pipeline** via **`env_file: .env`**. There is **no bundled Postgres** in this compose file—the containers use your URL (e.g. Cockroach Cloud) exactly like a local run.
+
+Copy **`.env.example`** → **`.env`** if you do not have one yet, then set **`DATABASE_URL`**.
+
+**Ports:** API **8000**, Streamlit **8501**. Streamlit always calls the API at **`http://api:8000`** inside Docker (compose **`environment`** overrides any host-only **`CROPGUARD_API_BASE`** in **`.env`** for that service).
+
+**TLS:** The image installs **`ca-certificates`** so **`sslmode=verify-full`** against managed providers usually works. If your provider requires a custom CA, add **`sslrootcert=...`** to **`DATABASE_URL`** (path must be valid *inside* the container, e.g. mount a file under **`/app/certs`** and reference it).
+
+1. **`.env`** with **`DATABASE_URL`** set (required).
+
+2. **Build and start API + Streamlit**
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+3. **Run the full Prefect pipeline once** (ingest + forecast; needs outbound internet for Open-Meteo and geocoding). Trained model artifacts are stored in the **`cropguard_artifacts`** volume.
+
+```bash
+docker compose --profile pipeline run --rm pipeline
+```
+
+4. **Forecast only** (after data exists)
+
+```bash
+docker compose --profile pipeline run --rm pipeline python main.py --forecast-only
+```
+
+5. **Open in the browser**
+
+- API docs: `http://127.0.0.1:8000/docs`
+- Dashboard UI: `http://127.0.0.1:8501`
+
+6. **Optional — pgAdmin** (does not auto-configure your server; add a server in the UI using the host/port/user from your **`DATABASE_URL`**)
+
+```bash
+docker compose --profile tools up -d
+```
+
+Then open `http://127.0.0.1:8080` (default login **`admin@admin.com`** / **`admin`** unless you changed it in compose).
+
+7. **Stop containers**
+
+```bash
+docker compose down
+```
+
+Add **`-v`** only if you want to remove the **ML artifact** volume **`cropguard_artifacts`** (your cloud database is unchanged).
 
 ---
 
 ## Environment
 
-Create **`cropguard/.env`** (never commit real secrets):
+Create **`cropguard/.env`** (see **`.env.example`**). At minimum:
 
 ```env
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=require
-DATABASE_SCHEMA=cropguard_dev
 ```
 
-- **`DATABASE_SCHEMA`** must match the schema used in `storage/setup_db.sql` (`cropguard_dev`), so unqualified table names in Python resolve correctly after `SET search_path`.
+**Docker:** **`api`** and **`pipeline`** load this file unchanged, so behaviour matches **`python main.py`** on the host against the same database.
 
-For **CockroachDB Cloud** (or other managed Postgres), use the connection string they provide; **`sslmode=verify-full`** usually requires a CA file path (e.g. libpq `sslrootcert` or the driver’s SSL args). Local Docker Postgres often uses `sslmode=disable` or omits SSL.
+Optional for **host** Streamlit when the API is not on port 8000:
+
+```env
+CROPGUARD_API_BASE=http://127.0.0.1:8000
+```
 
 ---
 
-## Quick start (local Postgres via Docker)
-
-### 1. Prerequisites
-
-- Python 3.10+ recommended  
-- Docker (for optional local Postgres + pgAdmin from `docker-compose.yml`)
-
-### 2. Python env
+## Quick start
 
 ```bash
 cd cropguard
-python3 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv
+# Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 3. Start database (optional local)
+Apply DDL (or rely on `python main.py`, which runs `apply_bronze_schema` first):
 
 ```bash
-docker compose up -d
+# example: psql < storage/setup_db.sql
 ```
 
-Apply DDL (either pipe SQL or use app — see step 5):
-
-```bash
-docker exec -i cropguard_db psql -U admin -d cropguard < storage/setup_db.sql
-```
-
-Point **`.env`** `DATABASE_URL` at that instance (example host port **`5433`** from compose).
-
-### 4. Orchestrated bootstrap + weather ingest
-
-From `cropguard/` with `.env` set:
+Run the full pipeline:
 
 ```bash
 python main.py
 ```
 
-This will:
-
-1. Run every statement in **`storage/setup_db.sql`** (idempotent creates + seed districts).  
-2. Run **`populate_crop_tables(truncate_existing=True)`** to rebuild crop bands from the CSV.  
-3. Run the **Prefect** pipeline (`orchestration/flow.py`) to fetch weather for all districts and upsert **`FactWeatherReadings`**.
-
-To run **only** the Prefect pipeline later:
+Forecast only (after bronze/silver data exists):
 
 ```bash
-python orchestration/flow.py
+python main.py --forecast-only
 ```
 
-### 5. Train the temperature model
-
-Needs network access (Open-Meteo) and valid `DimDistrict` coordinates:
-
-```bash
-python -m prediction.train_temperature --past-days 60
-```
-
-Produces:
-
-- **`artifacts/temperature_model.joblib`** — fitted pipeline + metadata (gitignored pattern `artifacts/*.joblib`).  
-- **`artifacts/temperature_model_metrics.json`** — holdout MAE/RMSE and per-district ingest notes.
-
-If you see “not enough supervised samples”, increase **`--past-days`** or add more districts with coordinates.
-
-### 6. Run the API
+**API**
 
 ```bash
 uvicorn api.app:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Useful endpoints:
-
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/healthz` | Liveness. |
-| `GET` | `/districts` | All districts with ids and coordinates. |
-| `GET` | `/model/temperature-metrics` | Last training metrics JSON (after training). |
-| `GET` | `/districts/{district_id}/forecast-health?forecast_days=7` | Hourly model forecast + per-crop daily **healthy / medium / danger** (days 1–14). |
+| `GET` | `/districts` | Districts from `bronze.districts_dim`. |
+| `GET` | `/dashboard/published-run` | Published ML run metadata (gold view). |
+| `GET` | `/dashboard/forecast-weather` | Weather fan charts data source. |
+| `GET` | `/dashboard/forecast-crop-risk` | Crop risk rows. |
 
-Example:
+**Streamlit** (with API running):
 
-```http
-GET http://127.0.0.1:8000/districts/1/forecast-health?forecast_days=7
+```bash
+streamlit run dashboard/app.py
 ```
-
-The API returns, per crop, reference ranges, a **daily** array (predicted min/max/mean and status), and a **worst_case** day.
 
 ---
 
-## How the model and health rules work (short)
+## Verify everything (suggested order)
 
-- **Why HistGradientBoosting?** Hourly temperature is **tabular sequential**: lags, rolling means, and calendar signals are strong baselines; trees handle nonlinear interactions and missing patterns without a custom torch stack. The model is **pooled** across districts with **`district_id`** ordinally encoded in the same pipeline.
-- **Target** — Each training row predicts **the temperature at the next hour** (`forecast_target`), so recursive forecasting appends predicted temps and recomputes features step by step.
-- **Health labels** — For each future **day**, we take the **min** and **max** of predicted hourly temperatures. **danger** if outside the **global** crop band; **medium** if outside the **district** optimum (or near edges) but still inside global rules; **healthy** when comfortably inside the district band (or global if no district row exists). Exact thresholds live in `api/health_engine.py`.
+Do this from the **`cropguard`** directory (after Quick start: venv, `pip install`, `.env` with **`DATABASE_URL`**).
+
+1. **Full pipeline** — `python main.py` (applies DDL via `apply_bronze_schema`, then Prefect ingest + forecast).
+2. **Forecast only** *(optional)* — `python main.py --forecast-only` once bronze/silver data already exists.
+3. **API** — second terminal, same venv: `uvicorn api.app:app --reload --host 0.0.0.0 --port 8000`
+4. **HTTP checks** — browser `http://127.0.0.1:8000/docs`, or for example:
+
+```bash
+curl -s http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:8000/districts
+curl -s http://127.0.0.1:8000/dashboard/published-run
+```
+
+On Windows PowerShell you can use `Invoke-RestMethod http://127.0.0.1:8000/healthz` (same paths as above).
+
+5. **Streamlit** — third terminal (keep **uvicorn** running): `streamlit run dashboard/app.py` — use the URL Streamlit prints. Set **`CROPGUARD_API_BASE`** if the API is not on port **8000**.
+6. **Prefect UI** *(optional)* — `prefect server start`, rerun `python main.py`, open `http://127.0.0.1:4200`.
 
 ---
 
@@ -189,14 +199,13 @@ The API returns, per crop, reference ranges, a **daily** array (predicted min/ma
 prefect server start
 ```
 
-Open `http://127.0.0.1:4200` to inspect flow runs when you use `orchestration/flow.py`.
+Open `http://127.0.0.1:4200` to inspect runs triggered via `main.py`.
 
 ---
 
-## pgAdmin (local compose only)
+## pgAdmin / host Postgres
 
-If you use the bundled **pgAdmin** service, add a server pointing at the **Postgres** container (e.g. host `127.0.0.1`, port `5433`).  
-**CockroachDB** is Postgres-wire compatible but **not** fully PostgreSQL-catalog compatible — GUI tools like pgAdmin may error on missing functions; prefer **psql**, **DBeaver**, or the vendor SQL shell for Cockroach.
+For **host-installed** Postgres or Cockroach, set **`DATABASE_URL`** in **`.env`** to match your instance. GUI tools against managed DBs: prefer **psql** or a vendor-compatible client if pgAdmin misbehaves.
 
 ---
 
@@ -205,5 +214,3 @@ If you use the bundled **pgAdmin** service, add a server pointing at the **Postg
 Tool: Gemini  
 Used for: Early Docker/port debugging, schema and Prefect scaffolding  
 Extent: Boilerplate and debugging assistance
-
-Subsequent features (validation, ML, crop tables, FastAPI) are described in this README and the linked modules above.

@@ -1,69 +1,186 @@
-CREATE SCHEMA IF NOT EXISTS cropguard_dev;
+CREATE SCHEMA IF NOT EXISTS bronze;
 
-CREATE TABLE IF NOT EXISTS cropguard_dev.DimDistrict (
+CREATE TABLE IF NOT EXISTS bronze.districts_dim (
     district_id SERIAL PRIMARY KEY,
     name VARCHAR(50) UNIQUE,
-    province VARCHAR(50),
     lat DECIMAL(9,6),
     lon DECIMAL(9,6)
 );
 
-CREATE TABLE IF NOT EXISTS cropguard_dev.FactWeatherReadings (
+
+CREATE TABLE IF NOT EXISTS bronze.weather_readings_fact (
     reading_id SERIAL PRIMARY KEY,
-    district_id INT REFERENCES cropguard_dev.DimDistrict(district_id),
-    timestamp TIMESTAMP,
-    temp_min DECIMAL(5,2),
-    temp_max DECIMAL(5,2),
-    precipitation_mm DECIMAL(5,2),
-    humidity_pct INT,
-    soil_moisture DECIMAL(5,2),
-    UNIQUE(district_id, timestamp)
+    district_id INT NOT NULL REFERENCES bronze.districts_dim(district_id),
+    observed_ts TIMESTAMP NOT NULL,
+    temperature DOUBLE PRECISION NOT NULL,
+    humidity_pct INT NOT NULL,
+    UNIQUE (district_id, observed_ts)
 );
 
-INSERT INTO cropguard_dev.DimDistrict (name, province, lat, lon) VALUES
-('Lahore', 'Punjab', 31.520400, 74.358700),
-('Karachi', 'Sindh', 24.860700, 67.001100),
-('Islamabad', 'Islamabad Capital Territory', 33.684400, 73.047900),
-('Faisalabad', 'Punjab', 31.450400, 73.087900),
-('Rawalpindi', 'Punjab', 33.600700, 73.067900),
-('Multan', 'Punjab', 30.198400, 71.468700),
-('Peshawar', 'Khyber Pakhtunkhwa', 34.015100, 71.575000),
-('Quetta', 'Balochistan', 30.179800, 66.975000),
-('Gujranwala', 'Punjab', 32.161700, 74.188300),
-('Hyderabad', 'Sindh', 25.396400, 68.377800),
-('Sialkot', 'Punjab', 32.492500, 74.531300),
-('Bahawalpur', 'Punjab', 29.395600, 71.672200),
-('Sargodha', 'Punjab', 32.085400, 72.675000),
-('Sukkur', 'Sindh', 27.713900, 68.836900),
-('Abbottabad', 'Khyber Pakhtunkhwa', 34.143900, 73.211400)
-ON CONFLICT (name) DO NOTHING;
 
-CREATE TABLE IF NOT EXISTS cropguard_dev.DimCrop (
-    crop_id SERIAL PRIMARY KEY,
-    name VARCHAR(64) NOT NULL UNIQUE
+CREATE TABLE IF NOT EXISTS bronze.crop_facts (
+    id SERIAL PRIMARY KEY,
+    n SMALLINT NOT NULL,
+    p SMALLINT NOT NULL,
+    k SMALLINT NOT NULL,
+    temperature DOUBLE PRECISION NOT NULL,
+    humidity DOUBLE PRECISION NOT NULL,
+    ph DOUBLE PRECISION NOT NULL,
+    rainfall DOUBLE PRECISION NOT NULL,
+    label VARCHAR(64) NOT NULL,
+    district VARCHAR(64) NOT NULL
 );
 
-COMMENT ON TABLE cropguard_dev.DimCrop IS 'Crop taxonomy (e.g. rice, wheat)';
-
-CREATE TABLE IF NOT EXISTS cropguard_dev.FactCropTemperatureRange (
-    crop_id INT PRIMARY KEY REFERENCES cropguard_dev.DimCrop(crop_id) ON DELETE CASCADE,
-    temp_min_c DECIMAL(5, 2) NOT NULL,
-    temp_max_c DECIMAL(5, 2) NOT NULL,
-    sample_count INT NOT NULL DEFAULT 0,
+CREATE TABLE IF NOT EXISTS bronze.ingestion_state (
+    key VARCHAR(128) PRIMARY KEY,
+    content_hash TEXT NOT NULL,
     updated_at TIMESTAMP NOT NULL DEFAULT now()
 );
 
-COMMENT ON TABLE cropguard_dev.FactCropTemperatureRange IS 'Dataset-derived operating temperature envelope per crop (all districts)';
+CREATE SCHEMA IF NOT EXISTS silver;
 
-CREATE TABLE IF NOT EXISTS cropguard_dev.FactCropDistrictHealthyTemp (
+CREATE OR REPLACE VIEW silver.districts_dim AS
+SELECT district_id, name, lat, lon
+FROM bronze.districts_dim;
+
+CREATE TABLE IF NOT EXISTS silver.crop_facts (
     id SERIAL PRIMARY KEY,
-    crop_id INT NOT NULL REFERENCES cropguard_dev.DimCrop(crop_id) ON DELETE CASCADE,
-    district_id INT NOT NULL REFERENCES cropguard_dev.DimDistrict(district_id) ON DELETE CASCADE,
-    temp_min_c DECIMAL(5, 2) NOT NULL,
-    temp_max_c DECIMAL(5, 2) NOT NULL,
-    sample_count INT NOT NULL DEFAULT 0,
-    updated_at TIMESTAMP NOT NULL DEFAULT now(),
-    UNIQUE (crop_id, district_id)
+    temperature DOUBLE PRECISION NOT NULL,
+    humidity DOUBLE PRECISION NOT NULL,
+    crop_name VARCHAR(128) NOT NULL,
+    district VARCHAR(80) NOT NULL
 );
 
-COMMENT ON TABLE cropguard_dev.FactCropDistrictHealthyTemp IS 'Healthy ambient temperature band for a crop within a district (from CSV aggregates)';
+CREATE TABLE IF NOT EXISTS silver.weather_readings_fact (
+    reading_id SERIAL PRIMARY KEY,
+    district_id INT NOT NULL REFERENCES bronze.districts_dim(district_id),
+    observed_ts TIMESTAMP NOT NULL,
+    temperature DOUBLE PRECISION NOT NULL,
+    humidity_pct INT NOT NULL,
+    UNIQUE (district_id, observed_ts)
+);
+
+
+CREATE TABLE IF NOT EXISTS silver.ml_model_registry (
+    model_id SERIAL PRIMARY KEY,
+    model_name VARCHAR(64) NOT NULL,
+    version VARCHAR(48) NOT NULL,
+    artifact_uri TEXT NOT NULL,
+    trained_at TIMESTAMP NOT NULL DEFAULT now(),
+    train_data_end_ts TIMESTAMP,
+    metrics_json JSONB,
+    feature_reference_json JSONB,
+    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+    UNIQUE (model_name, version)
+);
+
+CREATE TABLE IF NOT EXISTS silver.ml_forecast_run (
+    run_id BIGSERIAL PRIMARY KEY,
+    model_id INT REFERENCES silver.ml_model_registry(model_id),
+    started_at TIMESTAMP NOT NULL DEFAULT now(),
+    finished_at TIMESTAMP,
+    status VARCHAR(24) NOT NULL DEFAULT 'running',
+    input_weather_until TIMESTAMP,
+    horizon_days INT NOT NULL DEFAULT 7,
+    granularity VARCHAR(24) NOT NULL DEFAULT 'daily',
+    drift_checked BOOLEAN DEFAULT FALSE,
+    drift_retrain_triggered BOOLEAN DEFAULT FALSE,
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS silver.ml_forecast_run_published (
+    key VARCHAR(32) PRIMARY KEY,
+    run_id BIGINT REFERENCES silver.ml_forecast_run(run_id),
+    published_at TIMESTAMP NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS silver.ml_forecast_weather_point (
+    id BIGSERIAL PRIMARY KEY,
+    run_id BIGINT NOT NULL REFERENCES silver.ml_forecast_run(run_id),
+    district_id INT NOT NULL REFERENCES bronze.districts_dim(district_id),
+    valid_date DATE NOT NULL,
+    horizon_day SMALLINT NOT NULL,
+    temp_p10 DOUBLE PRECISION,
+    temp_p50 DOUBLE PRECISION,
+    temp_p90 DOUBLE PRECISION,
+    humidity_p10 DOUBLE PRECISION,
+    humidity_p50 DOUBLE PRECISION,
+    humidity_p90 DOUBLE PRECISION,
+    UNIQUE (run_id, district_id, valid_date)
+);
+
+CREATE TABLE IF NOT EXISTS silver.ml_forecast_crop_risk_point (
+    id BIGSERIAL PRIMARY KEY,
+    run_id BIGINT NOT NULL REFERENCES silver.ml_forecast_run(run_id),
+    district_id INT NOT NULL REFERENCES bronze.districts_dim(district_id),
+    crop_name VARCHAR(128) NOT NULL,
+    valid_date DATE NOT NULL,
+    risk_score DOUBLE PRECISION NOT NULL,
+    risk_tier VARCHAR(24) NOT NULL,
+    drivers_json JSONB,
+    UNIQUE (run_id, district_id, crop_name, valid_date)
+);
+
+CREATE SCHEMA IF NOT EXISTS gold;
+
+CREATE OR REPLACE VIEW gold.v_dashboard_forecast_weather AS
+SELECT
+    w.run_id,
+    w.district_id,
+    d.name AS district_name,
+    d.lat,
+    d.lon,
+    w.valid_date,
+    w.horizon_day,
+    w.temp_p10,
+    w.temp_p50,
+    w.temp_p90,
+    w.humidity_p10,
+    w.humidity_p50,
+    w.humidity_p90,
+    r.started_at AS run_started_at,
+    r.finished_at AS run_finished_at,
+    r.input_weather_until,
+    r.status AS run_status
+FROM silver.ml_forecast_weather_point w
+JOIN silver.ml_forecast_run_published p ON p.key = 'default' AND w.run_id = p.run_id
+JOIN silver.districts_dim d ON d.district_id = w.district_id
+LEFT JOIN silver.ml_forecast_run r ON r.run_id = w.run_id;
+
+CREATE OR REPLACE VIEW gold.v_dashboard_forecast_crop_risk AS
+SELECT
+    c.run_id,
+    c.district_id,
+    d.name AS district_name,
+    c.crop_name,
+    c.valid_date,
+    c.risk_score,
+    c.risk_tier,
+    c.drivers_json,
+    r.input_weather_until,
+    r.status AS run_status
+FROM silver.ml_forecast_crop_risk_point c
+JOIN silver.ml_forecast_run_published p ON p.key = 'default' AND c.run_id = p.run_id
+JOIN silver.districts_dim d ON d.district_id = c.district_id
+LEFT JOIN silver.ml_forecast_run r ON r.run_id = c.run_id;
+
+CREATE OR REPLACE VIEW gold.v_dashboard_published_forecast_run AS
+SELECT
+    r.run_id,
+    r.status,
+    r.started_at,
+    r.finished_at,
+    r.input_weather_until,
+    r.horizon_days,
+    r.granularity,
+    r.drift_checked,
+    r.drift_retrain_triggered,
+    m.model_id,
+    m.model_name,
+    m.version AS model_version,
+    m.artifact_uri,
+    m.trained_at AS model_trained_at,
+    p.published_at
+FROM silver.ml_forecast_run_published p
+JOIN silver.ml_forecast_run r ON r.run_id = p.run_id AND p.key = 'default'
+LEFT JOIN silver.ml_model_registry m ON m.model_id = r.model_id;
