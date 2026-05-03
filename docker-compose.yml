@@ -1,7 +1,25 @@
-# Loads the same DATABASE_URL (and any other vars) as on the host via `env_file: .env`.
-# Create `cropguard/.env` before running — see `.env.example`.
-
 services:
+  prefect:
+    build: .
+    container_name: cropguard_prefect
+    command: ["prefect", "server", "start", "--host", "0.0.0.0", "--port", "4200"]
+    ports:
+      - "4200:4200"
+    volumes:
+      - prefect_home:/root/.prefect
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:4200/api/health', timeout=5).read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 25s
+
   api:
     build: .
     container_name: cropguard_api
@@ -16,7 +34,6 @@ services:
     env_file:
       - .env
     environment:
-      # Always hit the API by Docker DNS (overrides a host-only URL if present in .env).
       CROPGUARD_API_BASE: http://api:8000
     ports:
       - "8501:8501"
@@ -38,9 +55,14 @@ services:
     container_name: cropguard_pipeline
     env_file:
       - .env
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
     command: ["python", "main.py"]
     volumes:
       - cropguard_artifacts:/app/artifacts
+    depends_on:
+      prefect:
+        condition: service_healthy
 
   pgadmin:
     image: dpage/pgadmin4
@@ -54,3 +76,4 @@ services:
 
 volumes:
   cropguard_artifacts:
+  prefect_home:

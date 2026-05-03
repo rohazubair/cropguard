@@ -18,5 +18,4 @@ RUN mkdir -p artifacts/forecast_weather
 
 EXPOSE 8000 8501
 
-# Default: API (overridden in docker-compose for streamlit / pipeline)
 CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,7 +1,7 @@
 CREATE SCHEMA IF NOT EXISTS bronze;
 
 CREATE TABLE IF NOT EXISTS bronze.districts_dim (
-    district_id SERIAL PRIMARY KEY,
+    district_id BIGSERIAL PRIMARY KEY,
     name VARCHAR(50) UNIQUE,
     lat DECIMAL(9,6),
     lon DECIMAL(9,6)
@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS bronze.districts_dim (
 
 CREATE TABLE IF NOT EXISTS bronze.weather_readings_fact (
     reading_id SERIAL PRIMARY KEY,
-    district_id INT NOT NULL REFERENCES bronze.districts_dim(district_id),
+    district_id BIGINT NOT NULL REFERENCES bronze.districts_dim(district_id),
     observed_ts TIMESTAMP NOT NULL,
     temperature DOUBLE PRECISION NOT NULL,
     humidity_pct INT NOT NULL,
@@ -44,7 +44,8 @@ SELECT district_id, name, lat, lon
 FROM bronze.districts_dim;
 
 CREATE TABLE IF NOT EXISTS silver.crop_facts (
-    id SERIAL PRIMARY KEY,
+    id BIGSERIAL PRIMARY KEY,
+    district_id BIGINT NOT NULL REFERENCES bronze.districts_dim(district_id),
     temperature DOUBLE PRECISION NOT NULL,
     humidity DOUBLE PRECISION NOT NULL,
     crop_name VARCHAR(128) NOT NULL,
@@ -53,7 +54,7 @@ CREATE TABLE IF NOT EXISTS silver.crop_facts (
 
 CREATE TABLE IF NOT EXISTS silver.weather_readings_fact (
     reading_id SERIAL PRIMARY KEY,
-    district_id INT NOT NULL REFERENCES bronze.districts_dim(district_id),
+    district_id BIGINT NOT NULL REFERENCES bronze.districts_dim(district_id),
     observed_ts TIMESTAMP NOT NULL,
     temperature DOUBLE PRECISION NOT NULL,
     humidity_pct INT NOT NULL,
@@ -97,7 +98,7 @@ CREATE TABLE IF NOT EXISTS silver.ml_forecast_run_published (
 CREATE TABLE IF NOT EXISTS silver.ml_forecast_weather_point (
     id BIGSERIAL PRIMARY KEY,
     run_id BIGINT NOT NULL REFERENCES silver.ml_forecast_run(run_id),
-    district_id INT NOT NULL REFERENCES bronze.districts_dim(district_id),
+    district_id BIGINT NOT NULL REFERENCES bronze.districts_dim(district_id),
     valid_date DATE NOT NULL,
     horizon_day SMALLINT NOT NULL,
     temp_p10 DOUBLE PRECISION,
@@ -112,7 +113,7 @@ CREATE TABLE IF NOT EXISTS silver.ml_forecast_weather_point (
 CREATE TABLE IF NOT EXISTS silver.ml_forecast_crop_risk_point (
     id BIGSERIAL PRIMARY KEY,
     run_id BIGINT NOT NULL REFERENCES silver.ml_forecast_run(run_id),
-    district_id INT NOT NULL REFERENCES bronze.districts_dim(district_id),
+    district_id BIGINT NOT NULL REFERENCES bronze.districts_dim(district_id),
     crop_name VARCHAR(128) NOT NULL,
     valid_date DATE NOT NULL,
     risk_score DOUBLE PRECISION NOT NULL,

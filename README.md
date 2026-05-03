@@ -44,7 +44,7 @@ flowchart LR
 | `dashboard/app.py` | Streamlit charts (HTTP client to API). |
 | `Dockerfile` | Python 3.11 image + **ca-certificates** (TLS to cloud DBs); API default CMD; compose overrides for Streamlit / pipeline. |
 | `.env.example` | Template for **`DATABASE_URL`** (copy to **`.env`**). |
-| `docker-compose.yml` | FastAPI + Streamlit; **`env_file: .env`** (same **`DATABASE_URL`** as host); optional **pgadmin** and **pipeline** profiles; **`cropguard_artifacts`** volume for pipeline. |
+| `docker-compose.yml` | **Prefect server** (UI **4200**), FastAPI, Streamlit; **`env_file: .env`** on app services; **`pipeline`** profile + **`PREFECT_API_URL`** to the compose Prefect server; **`cropguard_artifacts`** and **`prefect_home`** volumes. |
 
 ---
 
@@ -52,24 +52,28 @@ flowchart LR
 
 From **`cropguard/`** with [Docker Compose](https://docs.docker.com/compose/) installed.
 
-**Same database as on the host:** put **`DATABASE_URL`** in **`.env`** (same file you use for `python main.py`). Compose injects that file into **api** and **pipeline** via **`env_file: .env`**. There is **no bundled Postgres** in this compose file—the containers use your URL (e.g. Cockroach Cloud) exactly like a local run.
+**Same database as on the host:** put **`DATABASE_URL`** in **`.env`** (same file you use for `python main.py`). Compose injects that file into **`api`**, **`streamlit`**, and **`pipeline`** via **`env_file: .env`** (the **Prefect** server service does not load **`.env`** so a client **`PREFECT_API_URL`** there cannot confuse the server). There is **no bundled Postgres**—containers use your URL (e.g. Cockroach Cloud) like a local run.
 
 Copy **`.env.example`** → **`.env`** if you do not have one yet, then set **`DATABASE_URL`**.
 
-**Ports:** API **8000**, Streamlit **8501**. Streamlit always calls the API at **`http://api:8000`** inside Docker (compose **`environment`** overrides any host-only **`CROPGUARD_API_BASE`** in **`.env`** for that service).
+**Ports:** Prefect UI **4200**, API **8000**, Streamlit **8501**. Streamlit always calls the API at **`http://api:8000`** inside Docker (compose **`environment`** overrides any host-only **`CROPGUARD_API_BASE`** in **`.env`** for that service).
+
+**Prefect:** The **`prefect`** service runs **`prefect server start --host 0.0.0.0 --port 4200`**. The **`pipeline`** service sets **`PREFECT_API_URL=http://prefect:4200/api`** so flow runs show up in that UI (this overrides any **`PREFECT_API_URL`** in **`.env`** for pipeline only). Open **`http://127.0.0.1:4200`** on your machine while compose is up. Do not run a second Prefect server on the host on port **4200** at the same time.
 
 **TLS:** The image installs **`ca-certificates`** so **`sslmode=verify-full`** against managed providers usually works. If your provider requires a custom CA, add **`sslrootcert=...`** to **`DATABASE_URL`** (path must be valid *inside* the container, e.g. mount a file under **`/app/certs`** and reference it).
 
 1. **`.env`** with **`DATABASE_URL`** set (required).
 
-2. **Build and start API + Streamlit**
+2. **Build and start Prefect + API + Streamlit**
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-3. **Run the full Prefect pipeline once** (ingest + forecast; needs outbound internet for Open-Meteo and geocoding). Trained model artifacts are stored in the **`cropguard_artifacts`** volume.
+Wait until **`cropguard_prefect`** is healthy (first boot can take ~30s). Then open **`http://127.0.0.1:4200`** for the Prefect UI.
+
+3. **Run the full Prefect pipeline once** (ingest + forecast; needs outbound internet for Open-Meteo and geocoding). Compose starts the **`prefect`** service first if it is not running, then waits for it to be healthy. Trained model artifacts are stored in the **`cropguard_artifacts`** volume.
 
 ```bash
 docker compose --profile pipeline run --rm pipeline
@@ -83,6 +87,7 @@ docker compose --profile pipeline run --rm pipeline python main.py --forecast-on
 
 5. **Open in the browser**
 
+- Prefect UI: `http://127.0.0.1:4200`
 - API docs: `http://127.0.0.1:8000/docs`
 - Dashboard UI: `http://127.0.0.1:8501`
 
@@ -100,7 +105,99 @@ Then open `http://127.0.0.1:8080` (default login **`admin@admin.com`** / **`admi
 docker compose down
 ```
 
-Add **`-v`** only if you want to remove the **ML artifact** volume **`cropguard_artifacts`** (your cloud database is unchanged).
+Add **`-v`** only if you want to remove the **ML artifact** volume **`cropguard_artifacts`** and the **Prefect metadata** volume **`prefect_home`** (your cloud database is unchanged).
+
+---
+
+## Docker commands (reference)
+
+Run these from **`cropguard/`** (where **`docker-compose.yml`** is).
+
+### Status
+
+```bash
+docker compose ps
+```
+
+### URLs (after `docker compose up -d`)
+
+| App | URL |
+|-----|-----|
+| Prefect UI | `http://127.0.0.1:4200` |
+| FastAPI (Swagger) | `http://127.0.0.1:8000/docs` |
+| FastAPI health | `http://127.0.0.1:8000/healthz` |
+| Streamlit | `http://127.0.0.1:8501` |
+| pgAdmin *(if started with `--profile tools`)* | `http://127.0.0.1:8080` |
+
+### Logs (running stack)
+
+Follow logs from all default services:
+
+```bash
+docker compose logs -f
+```
+
+One service (service names from compose: **`prefect`**, **`api`**, **`streamlit`**):
+
+```bash
+docker compose logs -f api
+docker compose logs -f streamlit
+docker compose logs -f prefect
+```
+
+Last lines only, then follow:
+
+```bash
+docker compose logs -f --tail=200 prefect
+```
+
+Print logs once (no follow):
+
+```bash
+docker compose logs api
+```
+
+Same thing by **container name**:
+
+```bash
+docker logs -f cropguard_api
+docker logs -f cropguard_streamlit
+docker logs -f cropguard_prefect
+```
+
+**Pipeline** (`docker compose --profile pipeline run --rm pipeline`): output goes to **your terminal** for that command. There is no long-running **`pipeline`** container to **`docker compose logs`** after it exits (unless you drop **`--rm`**).
+
+### Stop containers
+
+```bash
+docker compose down
+```
+
+If you started **pgAdmin** with the **`tools`** profile, stop it too:
+
+```bash
+docker compose --profile tools down
+```
+
+Remove containers **and** named volumes (**`cropguard_artifacts`**, **`prefect_home`**; not your cloud DB):
+
+```bash
+docker compose down -v
+```
+
+### Run pipeline before bringing up the UI
+
+You may run the full pipeline first, then start the web stack (same **`.env`**):
+
+```bash
+docker compose build
+docker compose --profile pipeline run --rm pipeline
+docker compose up -d
+```
+
+### Docker Desktop
+
+To stop **all** containers on your machine, quit **Docker Desktop** from the system tray / menu (Windows or Mac).
 
 ---
 
@@ -112,7 +209,7 @@ Create **`cropguard/.env`** (see **`.env.example`**). At minimum:
 DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE?sslmode=require
 ```
 
-**Docker:** **`api`** and **`pipeline`** load this file unchanged, so behaviour matches **`python main.py`** on the host against the same database.
+**Docker:** **`api`**, **`streamlit`**, and **`pipeline`** load **`.env`**. **`pipeline`** also receives **`PREFECT_API_URL=http://prefect:4200/api`** from compose so runs register with the in-stack Prefect server (same DB as host; Prefect API target is Docker-specific).
 
 Optional for **host** Streamlit when the API is not on port 8000:
 
@@ -127,15 +224,10 @@ CROPGUARD_API_BASE=http://127.0.0.1:8000
 ```bash
 cd cropguard
 python -m venv .venv
-# Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-Apply DDL (or rely on `python main.py`, which runs `apply_bronze_schema` first):
-
-```bash
-# example: psql < storage/setup_db.sql
-```
+Apply DDL (or rely on `python main.py`, which runs `apply_bronze_schema` first).
 
 Run the full pipeline:
 
@@ -195,11 +287,17 @@ On Windows PowerShell you can use `Invoke-RestMethod http://127.0.0.1:8000/healt
 
 ## Prefect UI (optional)
 
+**Docker:** use the **`prefect`** service from **`docker compose up`** and open **`http://127.0.0.1:4200`** (see **Run with Docker**).
+
+**Host only** (no Docker Prefect): start a server locally, then run **`main.py`** so the client can reach it:
+
 ```bash
 prefect server start
 ```
 
-Open `http://127.0.0.1:4200` to inspect runs triggered via `main.py`.
+Set **`PREFECT_API_URL=http://127.0.0.1:4200/api`** in **`.env`** (or your shell) so host runs are recorded there.
+
+**Host + Docker Prefect:** with **`docker compose up`** exposing **4200**, you can point host runs at the same server using **`PREFECT_API_URL=http://127.0.0.1:4200/api`** in **`.env`**. Do not start a second **`prefect server start`** on the host on the same port.
 
 ---
 
